@@ -7,8 +7,13 @@
 #include <sys/epoll.h>
 #include <fcntl.h>
 #include <csignal>
+#include <set>
 #include "PthreadPool.h"
 #include "SocketEpoll.h"
+
+const char *NICKNAMEFLAG = "/nickname";
+std::unordered_map<int,std::string> users;
+std::set<std::string> nicknames;
 
 SocketEpoll::SocketEpoll() {
     // 创建套接字
@@ -143,28 +148,58 @@ void SocketEpoll::acceptConnection(void *arg) {
 }
 
 void SocketEpoll::communication(void *arg) {
-    printf("communication\n");
+//    printf("communication\n");
 
     auto* info = (ConnInfo*)(arg);
     int cfd = info->fd;
     int epfd = info->epfd;
 
-    char buf[MAXSIZE];
-    memset(buf,0,sizeof(buf));
+    char buf[MAXMESSAGESIZE];
     while(true){
-
+        memset(buf,0,sizeof(buf));
         int len = recv(cfd,buf,sizeof(buf),0);
         if(len > 0){
-            printf("client say : %s \n",buf);
-            len = send(cfd,buf,strlen(buf),0);
-            if(len < 0){
-                perror("send");
-                exit(0);
+            printf("%s\n",buf);
+            if(strstr(buf,NICKNAMEFLAG)!= nullptr){
+                std::string nickname = buf+strlen(NICKNAMEFLAG);
+                if(nicknames.count(nickname) == 0){
+                    printf("fd : %d , nickname : %s \n",cfd,nickname.c_str());
+                    users.insert({cfd,nickname});
+                    nicknames.insert(nickname);
+                    memset(buf,0,sizeof(buf));
+                    sprintf(buf,"setNicknameSuccess");
+                    len = send(cfd,buf,strlen(buf),0);
+                }else{
+                    memset(buf,0,sizeof(buf));
+                    sprintf(buf,"setNicknameFail");
+                    len = send(cfd,buf,strlen(buf),0);
+                }
+                printf("%s",buf);
+                if(len<0){
+                    perror("send");
+                    exit(0);
+                }
+//                break;
+            }else{
+                printf("%s> %s \n",users[cfd].c_str(),buf);
+                char *tmp = (char*)malloc(sizeof(char)*MAXMESSAGESIZE);
+                strcpy(tmp,buf);
+                sprintf(buf,"%s> %s\n",users[cfd].c_str(),tmp);
+                strcpy(info->msg,buf);
+                Task  task;
+                task.function = sendAllUsers;
+                task.arg = info;
+                info->pool->TaskAdd(task);
+                free(tmp);
             }
         }else if(len == 0){
             printf("client close the connection!\n");
             // 将此文件描述符从epoll中删除
             epoll_ctl(epfd,EPOLL_CTL_DEL,cfd, nullptr);
+            // 将此用户用哈希表中删除
+            std::string nickname = users[cfd];
+            users.erase(users.find(cfd));
+            nicknames.erase(nickname);
             close(cfd);
             break;
         }else if(len < 0){
@@ -179,5 +214,26 @@ void SocketEpoll::communication(void *arg) {
         }
     }
 }
+
+void SocketEpoll::sendAllUsers(void *arg) {
+    printf("sendAllUsers\n");
+    auto *info = (ConnInfo*)(arg);
+    int cfd = info->fd;
+    char msg[MAXMESSAGESIZE];
+    strcpy(msg,info->msg);
+
+    for(auto user : users) {
+        int fd = user.first;
+        if(fd != cfd) {
+            int len = send(fd,msg,strlen(msg),0);
+            if(len < 0){
+                perror("send");
+            }
+        }
+    }
+
+}
+
+
 
 
