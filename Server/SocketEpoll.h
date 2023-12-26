@@ -8,13 +8,15 @@
 #include <unordered_map>
 #include <string>
 #include "PthreadPool.h"
+#include "../Utils/MessageQueue.h"
 
 const int PORT = 9999;
-const int MAXMESSAGESIZE = 1024;
+const int MAXMESSAGESIZE = 2048;
 
 
 struct ConnInfo {
     PthreadPool* pool;  // 线程池
+    MessageQueue* msgQ;  // 消息队列
     int fd;             // 监听文件描述符
     int epfd;           // epoll监听文件描述符
     char msg[MAXMESSAGESIZE];
@@ -29,6 +31,8 @@ private:
     static void acceptConnection(void *arg);
     static void communication(void *arg);
     static void sendAllUsers(void *arg);
+    static void acceptMessage(void *arg);
+    static void messageHandler(void *arg);
 public:
     SocketEpoll();
 };

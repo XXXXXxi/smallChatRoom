@@ -3,12 +3,13 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <csignal>
+#include "../Utils/Message.h"
 
 const int PORT = 9999;
 const int MAXMESSAGESIZE = 1024;
 const char *NICKNAMEFLAG = "/nickname";
 
-void cleanCurLine();
+void cleanCurAndUpLine();
 
 int main () {
     int fd = socket(AF_INET,SOCK_STREAM,0);
@@ -51,6 +52,7 @@ int main () {
             exit(0);
         }else if(num) {
             if(FD_ISSET(fd,&rdtemp)){
+                // 接受服务器端信息
                 memset(buf,0,sizeof(buf));
                 int len = read(fd,buf,sizeof(buf));
                 if(len == 0) {
@@ -58,19 +60,27 @@ int main () {
                     exit(0);
                 }else if(len > 0){
 //                    printf("%s",buf);
-                    if(strstr(buf,"setNicknameFail") != nullptr){
+                    Message msg;
+                    msg = msg.deserialization(buf);
+                    if(msg.getType() ==  setNicknameFail){
                         char logInfo[MAXMESSAGESIZE] = "Same nickname,Please enter again! your nickname:";
-                        cleanCurLine();
                         write(fileno(stdout),logInfo, strlen(logInfo));
                         isNickname = false;
-                    }else if(strstr(buf,"setNicknameSuccess") == nullptr){
-                        write(fileno(stdout),buf,sizeof(buf));
+                    }else if(msg.getType() == sendMsg){
+                        std::string info = msg.printMessage();
+                        int length = info.length();
+                        char mm[length+1];
+                        strcpy(mm,info.c_str());
+                        write(fileno(stdout),mm,sizeof(mm));
+                    }else if(msg.getType() == setNicknameSuccess){
+                        nickname = msg.getMsg();
                     }
                 }else {
                     perror("read");
                     exit(0);
                 }
             }else if(FD_ISSET(msgfd,&rdtemp)){
+                // 用户输入信息
                 memset(buf,0,sizeof(buf));
                 int len = read(msgfd,buf,sizeof(buf));
                 char *msg = (char*)malloc(sizeof(char)*MAXMESSAGESIZE);
@@ -86,26 +96,41 @@ int main () {
                 }
                 msg[index] = '\0';
                 if(!isNickname) {
-                    char tmp[MAXMESSAGESIZE];
-                    nickname = std::string(msg);
-                    sprintf(tmp,"%s%s",NICKNAMEFLAG,msg);
-                    sprintf(msg,"%s",tmp);
+//                    char tmp[MAXMESSAGESIZE];
+//                    nickname = std::string(msg);
+//                    sprintf(tmp,"%s%s",NICKNAMEFLAG,msg);
+//                    sprintf(msg,"%s",tmp);
                     isNickname = !isNickname;
-                    send(fd,msg,strlen(msg),0);
+                    Message message(setNickname,msg,"host",msg);
+                    std::string strMessage = message.serialization();
+                    send(fd,strMessage.c_str(),strlen(strMessage.c_str()),0);
                     continue;
                 }
-                cleanCurLine();
-                write(fileno(stdout),"you> ",5);
+                Message message(sendMsg,nickname,"host",msg);
+                std::string strMessage = message.serialization();
+                cleanCurAndUpLine();
+                std::string nowTime = message.getTime();
+                int length = nowTime.length()+1;
+                char tt[length+1];
+                strcpy(tt,nowTime.c_str());
+                write(fileno(stdout),"[", 1);
+                write(fileno(stdout),tt, strlen(tt));
+                write(fileno(stdout),"]  you> ",8);
                 write(fileno(stdout),msg,strlen(msg));
                 write(fileno(stdout),"\n",1);
-                send(fd,msg,strlen(msg),0);
+                length = strMessage.length()+1;
+                char mm[length+1];
+                strcpy(mm,strMessage.c_str());
+//                write(fileno(stdout),mm,strlen(mm));
+
+                send(fd,mm,strlen(mm),0);
                 delete msg;
             }
         }
     }
 }
 
-void cleanCurLine()
+void cleanCurAndUpLine()
 {
     // 将光标移动到上一行
     write(fileno(stdout),"\033[F",3);

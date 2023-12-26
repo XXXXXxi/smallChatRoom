@@ -64,15 +64,23 @@ SocketEpoll::SocketEpoll() {
 
     // 创建线程池
     PthreadPool* pool = new PthreadPool(3,10);
+    // 创建消息队列
+    MessageQueue* msgQ = new  MessageQueue();
 
     auto* info = (ConnInfo*)malloc(sizeof(ConnInfo));
     info->pool = pool;
+    info->msgQ = msgQ;
     info->fd = fd;
     info->epfd = epfd;
     Task task;
     task.function = epollController;
     task.arg = info;
 
+    // epoll监控文件描述符
+    pool->TaskAdd(task);
+    task.function = messageHandler;
+    task.arg = info;
+    // 处理接受来的信息
     pool->TaskAdd(task);
     pthread_exit(nullptr);
 }
@@ -100,7 +108,7 @@ void SocketEpoll::epollController(void *arg) {
                 pool->TaskAdd(task);
             }else{
                 info->fd = curfd;
-                task.function = communication;
+                task.function = acceptMessage;
                 task.arg = info;
                 pool->TaskAdd(task);
             }
@@ -147,91 +155,83 @@ void SocketEpoll::acceptConnection(void *arg) {
     }
 }
 
-void SocketEpoll::communication(void *arg) {
-//    printf("communication\n");
-
-    auto* info = (ConnInfo*)(arg);
+// 接受信息
+void SocketEpoll::acceptMessage(void *arg) {
+    auto info = (ConnInfo*)(arg);
     int cfd = info->fd;
-    int epfd = info->epfd;
-
+    int epfd =  info->epfd;
+    auto msgQ  = info->msgQ;
     char buf[MAXMESSAGESIZE];
-    while(true){
-        memset(buf,0,sizeof(buf));
-        int len = recv(cfd,buf,sizeof(buf),0);
-        if(len > 0){
-            printf("%s\n",buf);
-            if(strstr(buf,NICKNAMEFLAG)!= nullptr){
-                std::string nickname = buf+strlen(NICKNAMEFLAG);
-                if(nicknames.count(nickname) == 0){
-                    printf("fd : %d , nickname : %s \n",cfd,nickname.c_str());
-                    users.insert({cfd,nickname});
-                    nicknames.insert(nickname);
-                    memset(buf,0,sizeof(buf));
-                    sprintf(buf,"setNicknameSuccess");
-                    len = send(cfd,buf,strlen(buf),0);
-                }else{
-                    memset(buf,0,sizeof(buf));
-                    sprintf(buf,"setNicknameFail");
-                    len = send(cfd,buf,strlen(buf),0);
-                }
-                printf("%s",buf);
-                if(len<0){
-                    perror("send");
-                    exit(0);
-                }
-//                break;
+    int len = recv(cfd,buf,sizeof(buf),0);
+    if(len > 0) {
+        Message msg;
+        msg = msg.deserialization(buf);
+        // 接受信息 处理昵称问题
+        if(msg.getType() == setNickname){
+            std::string nickname = msg.getFromName();
+            if(nicknames.count(nickname) == 0){
+                printf("fd : %d , nickname : %s \n",cfd,nickname.c_str());
+                users.insert({cfd,nickname});
+                nicknames.insert(nickname);
+                msg.setType(setNicknameSuccess);
+                std::string str =  msg.serialization();
+                len = send(cfd,str.c_str(),strlen(str.c_str()),0);
             }else{
-                printf("%s> %s \n",users[cfd].c_str(),buf);
-                char *tmp = (char*)malloc(sizeof(char)*MAXMESSAGESIZE);
-                strcpy(tmp,buf);
-                sprintf(buf,"%s> %s\n",users[cfd].c_str(),tmp);
-                strcpy(info->msg,buf);
-                Task  task;
-                task.function = sendAllUsers;
-                task.arg = info;
-                info->pool->TaskAdd(task);
-                free(tmp);
+                msg.setType(setNicknameFail);
+                std::string str =  msg.serialization();
+                len = send(cfd,str.c_str(),strlen(str.c_str()),0);
             }
-        }else if(len == 0){
-            printf("client close the connection!\n");
-            // 将此文件描述符从epoll中删除
-            epoll_ctl(epfd,EPOLL_CTL_DEL,cfd, nullptr);
-            // 将此用户用哈希表中删除
-            std::string nickname = users[cfd];
-            users.erase(users.find(cfd));
-            nicknames.erase(nickname);
-            close(cfd);
-            break;
-        }else if(len < 0){
-            if(errno == EAGAIN){
-                printf("data read complete ...\n");
-                break;
-            }else {
-                perror("recv");
+            if(len<0){
+                perror("send");
                 exit(0);
             }
+        }else{
+            // 将群发消息插入消息队列
+            msgQ->AddMsg(msg);
+        }
 
+    }
+    else if(len == 0){
+        printf("client close the connection!\n");
+        // 将此文件描述符从epoll中删除
+        epoll_ctl(epfd,EPOLL_CTL_DEL,cfd, nullptr);
+        // 将此用户用哈希表中删除
+        std::string nickname = users[cfd];
+        users.erase(users.find(cfd));
+        nicknames.erase(nickname);
+        close(cfd);
+    }else if(len < 0){
+        if(errno == EAGAIN){
+            printf("data read complete ...\n");
+        }else {
+            perror("recv");
+            exit(0);
         }
     }
 }
 
-void SocketEpoll::sendAllUsers(void *arg) {
-    printf("sendAllUsers\n");
-    auto *info = (ConnInfo*)(arg);
-    int cfd = info->fd;
-    char msg[MAXMESSAGESIZE];
-    strcpy(msg,info->msg);
-
-    for(auto user : users) {
-        int fd = user.first;
-        if(fd != cfd) {
-            int len = send(fd,msg,strlen(msg),0);
-            if(len < 0){
-                perror("send");
+// 处理信息
+void SocketEpoll::messageHandler(void *arg) {
+    auto info = (ConnInfo*)(arg);
+    auto msgQ = info->msgQ;
+    while(true){
+        Message message = msgQ->getMsg();
+        std::string nickname = message.getFromName();
+        std::string from = message.getFromName();
+        std::string to = message.getToName();
+        std::string msg = message.getMsg() +  "\n";
+        for(auto user : users){
+            if(user.second != from){
+                Message mm(sendMsg,from,user.second,msg);
+                std::string str = mm.serialization();
+//                std::cout <<str<< std::endl;
+                int len = send(user.first,str.c_str(),strlen(str.c_str()),0);
+                if(len < 0){
+                    perror("send");
+                }
             }
         }
     }
-
 }
 
 
